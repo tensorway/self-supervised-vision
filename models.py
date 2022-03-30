@@ -30,18 +30,8 @@ class BenchmarkModel(nn.Module):
             n_layers = int(model_name.split('mini_resnet')[-1])
             self.backbone = get_mini_resnet(n_layers)
             nfeatures = 64
-        elif model_name == 'mobilenet_v2':
-            self.backbone = th.hub.load('pytorch/vision:v0.10.0', model_name, pretrained=True)
-            nfeatures = 1280
-            self.backbone.classifier[1] = nn.Identity()
-        elif 'efficientnetv2' in model_name:
-            self.backbone = timm.create_model(model_name, pretrained=True)
-            nfeatures = self.backbone.classifier.weight.shape[1]
-            self.backbone.classifier = nn.Identity()
-        elif 'resnet' in model_name:   
-            self.backbone = th.hub.load('pytorch/vision:v0.10.0', model_name, pretrained=True)
-            nfeatures = self.backbone.fc.in_features
-            self.backbone.fc = nn.Identity()
+        else:
+            raise Exception('select mini resnet')
 
         self.projector = MLP(net_arch=[nfeatures]+projector_mlp_arch)
         self.classifier = nn.Linear(nfeatures, n_classes)
