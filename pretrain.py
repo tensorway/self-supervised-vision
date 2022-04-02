@@ -1,156 +1,148 @@
 #%%
 import time
 import torch
-import math
+import argparse
 import torch as th
 from pathlib import Path
-import torch.nn.functional as F
-from clearml import Task, Logger
 from models import BenchmarkModel
 from dataset import DoubleCifar10
+from methods.barlow_twins import BarlowTwinsProcessor
 from transforms import hard_transform
 from utils import load_model, save_model, seed_everything
+from optimization import CosineSchedulerWithWarmupStart
 from torch.utils.tensorboard import SummaryWriter
-
-MODEL_CHECKPOINTS_PATH = Path('model_checkpoints/')
-MODEL_NAME = 'barlow_twins_test_2048_D_norm'
-MODEL_PATH = MODEL_CHECKPOINTS_PATH/('model_'+MODEL_NAME+'.pt')
-OPTIMIZER_PATH = MODEL_CHECKPOINTS_PATH/('optimizer_'+MODEL_NAME+'.pt')
-SAVE_DELTA_ALL = 10*60 #in seconds, the model that is sto|red and overwritten to save space
-SAVE_DELTA_REVERT = 20*60 #in seconds, checkpoint models saved rarely to save storage
-THE_SEED = 42
-TRAIN_BATCH_SIZE = 512
-VALID_BATCH_SIZE = 512
-
-seed_everything(THE_SEED)
-writer = SummaryWriter(MODEL_NAME)
-
-# task = Task.init(project_name="barlow_twins", task_name="barlow_twins_bench_pretrain_5e-3")
-# logger = Logger.current_logger()
-
-#%%
-trainset = DoubleCifar10(transform=hard_transform)
-train_dataloader = torch.utils.data.DataLoader(trainset, batch_size=TRAIN_BATCH_SIZE,
-                                          shuffle=True, num_workers=8)
-
-testset = DoubleCifar10(transform=hard_transform, train=False)
-valid_dataloader = torch.utils.data.DataLoader(testset, batch_size=VALID_BATCH_SIZE,
-                                         shuffle=False, num_workers=6)
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print("using", device)
-
-# %%
-model = BenchmarkModel([2048, 2048, 2048], 'mini_resnet20')
-model.to(device)
-warmup, total, maxlr = 10, 300, 1e-3
-opt = th.optim.SGD([
-    {'params':model.parameters(), 'lr':maxlr},
-], weight_decay=1e-6, momentum=0.9)
-scheduler0 = th.optim.lr_scheduler.LambdaLR(opt, lr_lambda=[lambda ep: ep/warmup])
-scheduler1 = th.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=total, T_mult=1)
-
-# load_model(opt, str(OPTIMIZER_PATH))
-# load_model(model, str(MODEL_PATH))
+from finetune import finetune
 
 
-# %%
-step = 0
-t_last_save_revert = time.time()
-t_last_save_all = time.time()
-scaler = torch.cuda.amp.GradScaler()
-
-#%%
-l = []
-for ep in range(300):
-    if ep < warmup:
-        scheduler0.step()
-        currlr = scheduler0.get_last_lr()[0]
-    else: 
-        scheduler1.step()
-        currlr = scheduler1.get_last_lr()[0]
-
-    for ibatch, train_dict in enumerate(train_dataloader):
-        opt.zero_grad()
-        with torch.cuda.amp.autocast():
-            # two randomly augmented versions of x
-            y_a, y_b = train_dict['a'].to(device), train_dict['b'].to(device)
-
-            # compute embeddings
-            z_a = model.embed(y_a) # NxD
-            z_b = model.embed(y_b) # NxD
-
-            # normalize repr. along the batch dimension
-            z_a_norm = (z_a - z_a.mean(0)) / z_a.std(0) # NxD
-            z_b_norm = (z_b - z_b.mean(0)) / z_b.std(0) # NxD
-
-            # cross-correlation matrix
-            N, D = z_a_norm.shape
-            c = ( z_a_norm.T @ z_b_norm )/ N # DxD
-            c = th.nan_to_num(c, 0)
-
-            # loss
-            c_diff = (c - th.eye(D, device=device))**2 # DxD
-
-            # multiply off-diagonal elems of c_diff by lambda
-            lambda_ = 1/D
-            off_diagonal_mul = (th.ones_like(c_diff, device='cpu') - th.eye(D))*lambda_ + th.eye(D)
-            off_diagonal_mul = off_diagonal_mul.to(device)
-            loss = (c_diff * off_diagonal_mul).sum()
-            
-        scaler.scale(loss).backward()
-        scaler.step(opt)
-        scaler.update()
+# Argument parsing #################################################################################
+def add_standard_arguments(parser):
+    parser.add_argument("--model_name", type=str, help="mini_resnet is only available lol, but can have 20, 32, 44, 56, 110 or 1202 layers, so the options are mini_resnet20, mini_resnet32...", default='mini_resnet20')
+    parser.add_argument("-t", "--trainer", type=str, help='barlow or simclr or byol', choices=['barlow', 'simclr', 'byol'])
+    parser.add_argument('-p','--projector_shape', type=int, nargs='+', help='projector shape', default=[512, 512, 512])
+    parser.add_argument('-fs', '--from_scratch', type=bool, default=True)
+    parser.add_argument('-f', '--finetune', type=bool, default=True)
+    parser.add_argument("-s", "--seed", type=int, default=42, help="RNG seed. Default: 42.")
+    parser.add_argument("-b", "--batch_size", type=int, default=512, help="train and valid batch size")
+    parser.add_argument("-bf", "--batch_size_finetune", type=int, default=512, help="train and valid batch size for finetuning")
+    parser.add_argument("-e", "--n_total_epochs", type=int, default=300, help="total number of epochs")
+    parser.add_argument("-w", "--n_warmup_epochs", type=int, default=10, help="number of warmup epochs")
+    parser.add_argument("-lr", "--lr", type=float, default=1e-3, help="learning rate")
+    parser.add_argument("-l", "--lambda_", type=float, default=5e-3, help="lambda hyperparameter for the barlow twins")
+    parser.add_argument("-sda", "--save_delta_all", type=int, default=600, help="in seconds, the model that is stored and overwritten to save space")
+    parser.add_argument("-sdr", "--save_delta_revert", type=int, default=1200, help="in seconds, checkpoint models saved rarely to save storage")
+    parser.add_argument("-chp", "--checkpoints_path", type=str, default='model_checkpoints/', help="folder where to save the checkpoints")
+    parser.add_argument("-r", "--results_path", type=str, default='results.txt', help="file where to save the results")
 
 
-        if ibatch%30 == 0:
-            print(loss.item())
-            writer.add_scalar("Loss/train", loss, step)
-            writer.add_scalar('lr/train', currlr, step)
-            print(ep, step, loss.item())
-        if ibatch % 100 == 0:
-            for ibatch, valid_dict in enumerate(valid_dataloader):
-                with th.no_grad():
-                    with torch.cuda.amp.autocast():
-                        # same as in train loop
-                        y_a, y_b = valid_dict['a'].to(device), valid_dict['b'].to(device)
-                        z_a = model.embed(y_a) # NxD
-                        z_b = model.embed(y_b) # NxD
-                        z_a_norm = (z_a - z_a.mean(0)) / z_a.std(0) # NxD
-                        z_b_norm = (z_b - z_b.mean(0)) / z_b.std(0) # NxD
-                        N, D = z_a_norm.shape
-                        c = ( z_a_norm.T @ z_b_norm )/ N # DxD
-                        c_diff = (c - th.eye(D, device=device))**2 # DxD
-                        lambda_ = 1/D#5e-3*N/512
-                        off_diagonal_mul = (th.ones_like(c_diff, device='cpu') - th.eye(D))*lambda_ + th.eye(D)
-                        off_diagonal_mul = off_diagonal_mul.to(device)
-                        loss = (c_diff * off_diagonal_mul).sum()
-                        print('val loss=', loss)
-                        writer.add_scalar("Loss/valid", loss, step)
-                        if ibatch%300==0:
-                            writer.add_image('mat/valid', c.detach().cpu().unsqueeze(0), step)
-                        # logger.report_scalar("loss", "valid", iteration=step , value=loss.item())
-                        # logger.report_confusion_matrix("similarity mat", "valid", iteration=step, matrix=c.detach().cpu().numpy())
-                    break
 
-        if time.time() - t_last_save_all > SAVE_DELTA_ALL:
-            save_model(model, str(MODEL_PATH))
-            save_model(opt, str(OPTIMIZER_PATH))
-            t_last_save_all = time.time()
+# Main loop #################################################################################
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Experiment running script')
+    add_standard_arguments(parser)
+    args = parser.parse_args()
 
-        if time.time() - t_last_save_revert > SAVE_DELTA_REVERT:
-            save_model(model, str(MODEL_PATH).split('.pt')[0] + str(step) + '.pt')
-            save_model(opt, str(OPTIMIZER_PATH).split('.pt')[0] + str(step) + '.pt')
-            t_last_save_revert = time.time()
-        
+    model_str = 'pretrain_'+args.trainer+'_'+str(args.projector_shape)+'_bs='+str(args.batch_size)+'_lr='+str(args.lr)+'_lambda='+str(args.lambda_)
+    print(model_str)
+    model_path = Path(args.checkpoints_path)/('model_'+model_str+'.pt')
+    optimizer_path =  Path(args.checkpoints_path)/('optimizer_'+model_str+'.pt')
+    writer = SummaryWriter('tensorboard/'+model_str)
 
-        step += 1
+    seed_everything(args.seed)
 
-# %%
-save_model(model, str(MODEL_PATH).split('.pt')[0] + str(step) + '.pt')
-save_model(opt, str(OPTIMIZER_PATH).split('.pt')[0] + str(step) + '.pt')
-# %%
-save_model(model, str(MODEL_PATH))
-save_model(opt, str(OPTIMIZER_PATH))
+    trainset = DoubleCifar10(transform=hard_transform)
+    testset = DoubleCifar10(transform=hard_transform, train=False)
+    train_dataloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=8)
+    valid_dataloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=6)
 
-# %%
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print("using", device)
+
+    model = BenchmarkModel(args.projector_shape, args.model_name)
+    model.to(device)
+    opt = th.optim.SGD([
+        {'params':model.parameters(), 'lr':args.lr},
+    ], weight_decay=1e-6, momentum=0.9)
+    scheduler = CosineSchedulerWithWarmupStart(opt, n_warmup_epochs=args.n_warmup_epochs, n_total_epochs=args.n_total_epochs)
+    if not args.from_scratch:
+        load_model(model, model_path)
+        load_model(opt, optimizer_path)
+
+    if args.trainer == 'barlow':
+        processor = BarlowTwinsProcessor(lambda_=args.lambda_)
+    elif args.trainer == 'simclr':
+        processor = SimClrProcessor()
+    elif args.trainer == 'byol':
+        processor = ByolProcessor()
+
+
+    # %%
+    step = 0
+    t_last_save_revert = time.time()
+    t_last_save_all = time.time()
+    scaler = torch.cuda.amp.GradScaler()
+
+    # Train loop #################################################################################
+    #%%
+    for ep in range(args.n_total_epochs):
+        scheduler.step()
+
+        for ibatch, train_dict in enumerate(train_dataloader):
+            opt.zero_grad()
+            with torch.cuda.amp.autocast():
+                loss, _ = processor.process_batch(model, train_dict, device)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+
+
+            if ibatch%30 == 0:
+                print(ep, step, loss.item())
+                writer.add_scalar("Loss/train", loss, step)
+                writer.add_scalar('lr/train', scheduler.get_last_lr(), step)
+
+            if ibatch % 100 == 0:
+                for ibatch, valid_dict in enumerate(valid_dataloader):
+                    with th.no_grad():
+                        with torch.cuda.amp.autocast():
+                            loss, debug_dict = processor.process_batch(model, train_dict, device)
+                            print('val loss=', loss)
+                            writer.add_scalar("Loss/valid", loss, step)
+                            if ibatch%300==0:
+                                writer.add_image('mat/valid', debug_dict['c'].detach().cpu().unsqueeze(0), step)
+                        break
+
+            if time.time() - t_last_save_all > args.save_delta_all:
+                save_model(model, str(model_path))
+                save_model(opt, str(optimizer_path))
+                t_last_save_all = time.time()
+
+            if time.time() - t_last_save_revert > args.save_delta_revert:
+                save_model(model, str(model_path).split('.pt')[0] + str(step) + '.pt')
+                save_model(opt, str(optimizer_path).split('.pt')[0] + str(step) + '.pt')
+                t_last_save_revert = time.time()
+
+            step += 1
+
+    save_model(model, str(model_path))
+    save_model(opt, str(optimizer_path))
+
+
+    # Finetune #################################################################################
+    if args.finetune:
+        acc = finetune(
+            model=model,
+            model_path=Path(args.checkpoints_path)/('model_finetune_'+model_str+'.pt'),
+            optimizer_path=Path(args.checkpoints_path)/('optimizer_finetune_'+model_str+'.pt'),
+            model_str=model_str,
+            device=device,
+            train_batch_size=args.batch_size_finetune,
+            valid_batch_size=args.batch_size_finetune,
+            # numepochs=3
+        )
+        with open(args.results_path, 'a') as fout:
+            fout.write('acc='+str(acc))
+            dic = vars(args)
+            for k in sorted(dic.keys()):
+                fout.write(','+str(k)+'='+str(dic[k]))
+
+
