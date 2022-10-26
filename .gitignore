@@ -130,6 +130,6 @@ dmypy.json
 
 
 #my 
-data/*
-tensorboard/*
+data/cifar-10-batches-py/*
+results/tensorboard/*
 model_checkpoints/*

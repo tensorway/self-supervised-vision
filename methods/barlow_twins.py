@@ -5,6 +5,7 @@ import torch as th
 class BarlowTwinsProcessor:
     def __init__(self, lambda_=5e-3) -> None:
         self.lambda_ = lambda_
+        self.auto_lambda = lambda_ == -1
 
     def process_batch(self, model, data_dict, device):
         # two randomly augmented versions of x
@@ -25,6 +26,10 @@ class BarlowTwinsProcessor:
 
         # loss
         c_diff = (c - th.eye(D, device=device))**2 # DxD
+
+        #calculate lambda
+        if self.auto_lambda:
+            self.lambda_ = 1/N
 
         # multiply off-diagonal elems of c_diff by lambda
         off_diagonal_mul = (th.ones_like(c_diff, device='cpu') - th.eye(D))*self.lambda_ + th.eye(D)

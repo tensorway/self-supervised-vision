@@ -7,9 +7,9 @@ import torch.nn as nn
 from pathlib import Path
 import torch.nn.functional as F
 from clearml import Task, Logger
-from models import BenchmarkModel
-from transforms import train_transform, val_transform
-from utils import load_model, save_model, seed_everything
+from models.models import BenchmarkModel
+from data.transforms import train_transform, val_transform
+from misc.utils import load_model, save_model, seed_everything
 import argparse
 from torch.utils.tensorboard import SummaryWriter
 
@@ -21,12 +21,14 @@ def add_standard_arguments(parser):
     parser.add_argument('-p','--projector_shape', type=int, nargs='+', help='projector shape', default=[512, 512, 512])
     parser.add_argument("-s", "--seed", type=int, default=42, help="RNG seed. Default: 42.")
     parser.add_argument("-b", "--batch_size", type=int, default=512, help="train and valid batch size")
-    parser.add_argument("-e", "--n_total_epochs", type=int, default=100, help="total number of epochs")
+    parser.add_argument("-e", "--n_total_epochs", type=int, default=150, help="total number of epochs")
     parser.add_argument("-lr", "--lr", type=float, default=3e-4, help="learning rate")
-    parser.add_argument("-sda", "--save_delta_all", type=int, default=600, help="in seconds, the model that is stored and overwritten to save space")
-    parser.add_argument("-sdr", "--save_delta_revert", type=int, default=1200, help="in seconds, checkpoint models saved rarely to save storage")
+    parser.add_argument("-sda", "--save_delta_all", type=int, default=1500, help="in seconds, the model that is stored and overwritten to save space")
+    parser.add_argument("-sdr", "--save_delta_revert", type=int, default=3000, help="in seconds, checkpoint models saved rarely to save storage")
     parser.add_argument("-chp", "--checkpoints_path", type=str, default='model_checkpoints/', help="folder where to save the checkpoints")
     parser.add_argument("-ptr", "--pretrained_model_path", type=str, help="pretrained model path from which to train")
+    parser.add_argument("-r", "--results_path", type=str, default='results.txt', help="file where to save the results")
+
 
 
 
@@ -83,12 +85,14 @@ def finetune(
                     cumacc += (outputs.argmax(dim=-1) == labels).float().mean().item()
         acc, loss = cumacc/(ibatch+1), cumloss/(ibatch+1)
         print('valid', loss.item(), acc, ibatch)
-        writer.add_scalar("Loss/valid", loss, step)
+        writer.add_scalar("Loss_finetune/valid", loss, step)
         writer.add_scalar("acc/valid", acc, step)
         model.train()
+        model.backbone.eval()
         return acc
 
     for ep in range(numepochs):
+        model.backbone.eval()
         for ibatch, (imgs, labels) in enumerate(train_dataloader):
 
             opt.zero_grad()
@@ -104,7 +108,7 @@ def finetune(
 
 
             if ibatch%30 == 0:
-                writer.add_scalar("Loss/train", loss, step)
+                writer.add_scalar("Loss_finetune/train", loss, step)
                 writer.add_scalar("acc/train", acc, step)
                 print(ep, step, loss.item(), acc)
             if ibatch % 300 == 0:
@@ -149,7 +153,7 @@ if __name__ == '__main__':
     model.to(device)
     load_model(model, args.pretrained_model_path)
 
-    finetune(
+    acc = finetune(
         model=model, 
         train_batch_size=args.batch_size, 
         valid_batch_size=args.batch_size, 
@@ -163,3 +167,10 @@ if __name__ == '__main__':
         model_str=args.pretrained_model_path,
         device=device,
         )
+
+    # Write results #################################################################################
+    with open(args.results_path, 'a') as fout:
+        fout.write('acc='+str(acc))
+        dic = vars(args)
+        for k in sorted(dic.keys()):
+            fout.write(','+str(k)+'='+str(dic[k]))

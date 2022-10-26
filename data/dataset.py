@@ -1,14 +1,8 @@
 
 #%%
-import os
-import glob
-import pandas as pd
-from torch.utils.data import Dataset
-from PIL import Image
 import torch as th
-import random
 from torchvision.datasets import CIFAR10
-from transforms import val_transform
+from data.transforms import val_transform
 
 
 class DoubleCifar10(CIFAR10):

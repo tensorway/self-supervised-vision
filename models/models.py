@@ -3,7 +3,8 @@ import timm
 import torch as th
 import torch
 from torch import nn
-from mini_resnet import get_mini_resnet
+from models.mini_resnet import get_mini_resnet
+from models.big_cifar_resnet import ResNet18
 import torch.nn.functional as F
 
 
@@ -30,15 +31,29 @@ class BenchmarkModel(nn.Module):
             n_layers = int(model_name.split('mini_resnet')[-1])
             self.backbone = get_mini_resnet(n_layers)
             nfeatures = 64
+        elif model_name == 'resnet18':
+            self.backbone = ResNet18()
+            nfeatures = 512
         else:
-            raise Exception('select mini resnet')
+            raise Exception('select mini resnet or resnet18')
 
         self.projector = MLP(net_arch=[nfeatures]+projector_mlp_arch)
         self.classifier = nn.Linear(nfeatures, n_classes)
+        self.temperature = 0.5
 
     def embed(self, x):
         x = self.backbone(x)
         return self.projector(x)
+
+    def get_temperature(self, ):
+        return self.temperature
+
+    def classify(self, embedding):
+        x = self.classifier(embedding)
+        return th.softmax(x, dim=-1)
+
+    def embed_without_head(self, x):
+        return self.backbone(x)
 
     def forward(self, x):
         x = self.backbone(x)
@@ -64,10 +79,14 @@ class MLP(nn.Module):
 
 # %%
 if __name__ == '__main__':
-    model = BenchmarkModel([1000, 1000], 'mini_resnet20')
+    model = BenchmarkModel([1000, 1000], 'resnet18')
     batch = th.rand(3, 3, 32, 32)
     print(model(batch).shape)
     print(model(batch))
-
+    
+    nump = 0
+    for p in model.parameters():
+        nump += p.numel()
+    print('model has ', nump/10**6, 'M parameters')
 
 # %%

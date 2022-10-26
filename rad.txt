@@ -1,0 +1,12 @@
+barlow twins  
+    what is it 
+    graph projectors
+    
+
+
+we found it
+necessary to use the linear learning rate scaling rule [25]
+here, without which the accuracy drops (by ∼ 2% with a
+1024 mini-batch). But optimizing with a larger mini-batch
+is harder [25], and it is questionable whether the trend can
+be extrapolated into a larger K even if memory is sufficien
