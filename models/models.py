@@ -69,13 +69,14 @@ class MLP(nn.Module):
     def __init__(self, net_arch, last_activation= lambda x:x):
         super().__init__()
         self.layers = nn.ModuleList([nn.Linear(a, b) for a, b in zip(net_arch[:-1], net_arch[1:])])
+        self.batch_norms = nn.ModuleList([nn.BatchNorm1d(b) for b in net_arch[1:]])
         self.last_activation = last_activation
     def forward(self, x):
         h = x
-        for lay in self.layers[:-1]:
-            h = F.relu(lay(h))
+        for lay, norm in zip(self.layers[:-1], self.batch_norms):
+            h = F.relu(norm(lay(h)))
         h = self.layers[-1](h)
-        return h
+        return self.last_activation(h)
 
 # %%
 if __name__ == '__main__':
