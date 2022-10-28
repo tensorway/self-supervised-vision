@@ -15,6 +15,7 @@ from misc.utils import load_model, save_model, seed_everything
 from misc.schedulers import CosineSchedulerWithWarmupStart
 from torch.utils.tensorboard import SummaryWriter
 from finetune import finetune
+from tqdm import tqdm
 
 
 # Argument parsing #################################################################################
@@ -57,12 +58,6 @@ if __name__ == '__main__':
 
     seed_everything(args.seed)
 
-    # all datasets used
-    trainset = DoubleCifar10(transform=hard_transform)
-    testset = DoubleCifar10(transform=hard_transform, train=False)
-    train_dataloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=8)
-    valid_dataloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=6)
-
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print("using", device)
 
@@ -93,6 +88,12 @@ if __name__ == '__main__':
             temperature=args.temperature
         )
 
+    # all datasets used
+    trainset = DoubleCifar10(transform=processor.get_hard_transform())
+    testset = DoubleCifar10(transform=processor.get_hard_transform(), train=False)
+    train_dataloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=8)
+    valid_dataloader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=6)
+
 
     # %%
     step = 0
@@ -102,7 +103,7 @@ if __name__ == '__main__':
 
     # Train loop #################################################################################
     #%%
-    for ep in range(args.n_total_epochs):
+    for ep in tqdm(range(args.n_total_epochs)):
 
         for ibatch, train_dict in enumerate(train_dataloader):
             opt.zero_grad()

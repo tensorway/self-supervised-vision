@@ -1,0 +1,2 @@
+62.61% -> barlow [2048, 2048, 2048], bsize=512, mini_resnet20, epochs=100, https://github.com/sayakpaul/Barlow-Twins-TF
+ 

@@ -1,5 +1,7 @@
 #%%
 import torch as th
+from torchvision import transforms
+from torchvision import transforms as T 
 
 
 class BarlowTwinsProcessor:
@@ -40,3 +42,17 @@ class BarlowTwinsProcessor:
         debug_dict = {name:value for name, value in zip(vars().keys(), vars().values())}
 
         return loss, debug_dict
+
+    def get_hard_transform(self):
+        return T.Compose([
+            T.Resize(48),
+            T.RandomCrop(32),
+            T.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
+            # T.ColorJitter(brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2),
+            T.RandomGrayscale(p=0.3),
+            T.RandomSolarize(threshold=200, p=0.3),
+            T.RandomHorizontalFlip(),
+            # transforms.GaussianBlur(kernel_size=3), # seems to hurt perfomance
+            T.ToTensor(),
+            T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ])
