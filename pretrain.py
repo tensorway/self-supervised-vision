@@ -1,5 +1,4 @@
 #%%
-from concurrent.futures import process
 import time
 import torch
 import argparse
@@ -10,7 +9,7 @@ from data.dataset import DoubleCifar10
 from methods.barlow_twins import BarlowTwinsProcessor
 from methods.simclr import SimClrTrainer
 from methods.moco2 import Moco2Processor
-from data.transforms import hard_transform
+from methods.mae import MaskedAutoencoderProcessor
 from misc.utils import load_model, save_model, seed_everything
 from misc.schedulers import CosineSchedulerWithWarmupStart
 from torch.utils.tensorboard import SummaryWriter
@@ -21,7 +20,7 @@ from tqdm import tqdm
 # Argument parsing #################################################################################
 def add_standard_arguments(parser):
     parser.add_argument("--model_name", type=str, help="mini_resnet is only available lol, but can have 20, 32, 44, 56, 110 or 1202 layers, so the options are mini_resnet20, mini_resnet32...", default='mini_resnet20')
-    parser.add_argument("-t", "--trainer", type=str, help='barlow or simclr or byol', choices=['barlow', 'simclr', 'byol', 'moco2'])
+    parser.add_argument("-t", "--trainer", type=str, help='barlow or simclr or byol', choices=['barlow', 'simclr', 'byol', 'moco2', 'mae'])
     parser.add_argument('-p','--projector_shape', type=int, nargs='+', help='projector shape', default=[512, 512, 512])
     parser.add_argument('-r', '--resume', default=False, action='store_true', help='to resume training or not') # complements --from_scratch see code
     parser.add_argument('-f', '--finetune', type=bool, default=True)
@@ -40,6 +39,10 @@ def add_standard_arguments(parser):
     parser.add_argument("-qc", "--queue_capacity", type=int, default=2**12, help="the capacity of queue in moco2")
     parser.add_argument("-mm", "--moco_momentum", type=float, default=0.999, help="momentum value in moco")
     parser.add_argument("-temp", "--temperature", type=float, default=0.5, help="temperature in softmax of all models")
+    parser.add_argument("-wd", "--weight_decay", type=float, default=1e-6, help="weight decay parameter")
+    parser.add_argument("-mask", "--masking_ratio", type=float, default=0.75, help="ratio of tokens to mask in MAE training")
+    parser.add_argument("-ps", "--patch_size", type=int, default=4, help="pixel width and height of a patch, total number of pixels in a patch is patch_size**2")
+    parser.add_argument("-o", "--optimizer", type=str, help='which optimizer to use for pretraining', choices=['sgd', 'adamw'], default='sgd')
 
 
 
@@ -62,11 +65,16 @@ if __name__ == '__main__':
     print("using", device)
 
     # create model and optimizer
-    model = BenchmarkModel(args.projector_shape, args.model_name)
+    model = BenchmarkModel(args.projector_shape, args.model_name, patch_size=args.patch_size)
     model.to(device)
-    opt = th.optim.SGD([
-        {'params':model.parameters(), 'lr':args.lr},
-    ], weight_decay=1e-6, momentum=0.9)
+    if args.optimizer == 'sgd':
+        opt = th.optim.SGD([
+            {'params':model.parameters(), 'lr':args.lr},
+        ], weight_decay=args.weight_decay, momentum=0.9)
+    elif args.optimizer == 'adamw':
+        opt = th.optim.AdamW([
+            {'params':model.parameters(), 'lr':args.lr},
+        ], weight_decay=args.weight_decay, betas=(0.9, 0.95))
     scheduler = CosineSchedulerWithWarmupStart(opt, n_warmup_epochs=args.n_warmup_epochs, n_total_epochs=args.n_total_epochs)
     
     if args.resume:
@@ -86,6 +94,11 @@ if __name__ == '__main__':
             queue_capacity=args.queue_capacity, 
             momentum=args.moco_momentum,
             temperature=args.temperature
+        )
+    elif args.trainer == 'mae':
+        processor = MaskedAutoencoderProcessor(
+            masking_proportion=args.masking_ratio, 
+            patch_size=args.patch_size
         )
 
     # all datasets used
@@ -128,7 +141,8 @@ if __name__ == '__main__':
                             print('val loss=', loss)
                             writer.add_scalar("Loss/valid", loss, step)
                             if ibatch%300==0:
-                                writer.add_image('mat/valid', (debug_dict['c']/(1e-9+th.min(debug_dict['c']))).detach().cpu().unsqueeze(0), step)
+                                processor.tensorboard_plot(writer, step, debug_dict)
+                                # writer.add_image('mat/valid', (debug_dict['c']/(1e-9+th.min(debug_dict['c']))).detach().cpu().unsqueeze(0), step)
                         break
 
             if time.time() - t_last_save_all > args.save_delta_all:

@@ -14,6 +14,11 @@ easy_transform = transforms.Compose([
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ])
 
+reverse_normalize_transform = transforms.Compose([
+    transforms.Normalize((0.0, 0.0, 0.0), (2, 2, 2)),
+    transforms.Normalize((0.5, 0.5, 0.5), (1, 1, 1)),
+    ])
+
 
 val_transform = transforms.Compose([
     transforms.ToTensor(),

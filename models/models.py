@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from models.mini_resnet import get_mini_resnet
 from models.big_cifar_resnet import ResNet18
+from models.mae import MAEModel
 import torch.nn.functional as F
 
 
@@ -14,6 +15,7 @@ class BenchmarkModel(nn.Module):
         projector_mlp_arch,
         model_name='mini_resnet20',
         n_classes = 10,
+        **kwargs,
     ):
         '''
         simple embedding based model used as a benchmark
@@ -34,8 +36,11 @@ class BenchmarkModel(nn.Module):
         elif model_name == 'resnet18':
             self.backbone = ResNet18()
             nfeatures = 512
+        elif model_name == 'mae':
+            self.backbone = MAEModel(**kwargs)
+            nfeatures = self.backbone.get_output_dim()
         else:
-            raise Exception('select mini resnet or resnet18')
+            raise Exception('select mini resnet or resnet18 or mae')
 
         self.projector = MLP(net_arch=[nfeatures]+projector_mlp_arch)
         self.classifier = nn.Linear(nfeatures, n_classes)
@@ -77,6 +82,10 @@ class MLP(nn.Module):
             h = F.relu(norm(lay(h)))
         h = self.layers[-1](h)
         return self.last_activation(h)
+
+#%%
+
+
 
 # %%
 if __name__ == '__main__':
