@@ -8,7 +8,7 @@ def load_model(model, path):
         print(f"loaded model ({type(model).__name__}) from {path}")
     except Exception as e:
         print(f"could not load model ({type(model).__name__}) from {path}")
-        raise e
+        print(e)
 
 def save_model(model, path):
     th.save(model.state_dict(), path)

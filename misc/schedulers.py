@@ -13,7 +13,7 @@ class CosineSchedulerWithWarmupStart():
         self.optimizer = optimizer
         self.n_warmup_epochs = n_warmup_epochs
         self.n_total_epochs = n_total_epochs
-        self.warmup_optimizer = th.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[lambda ep: ep/n_warmup_epochs])
+        self.warmup_optimizer = th.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[lambda ep: ep/(n_warmup_epochs+1e-10)])
         self.long_optimizer   = th.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=n_total_epochs, T_mult=1)
         self.last_epoch = last_epoch
 

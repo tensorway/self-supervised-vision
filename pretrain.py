@@ -55,9 +55,9 @@ if __name__ == '__main__':
     # creat model name and begin tensorboard on that name
     model_str = 'pretrain_'+args.trainer+'_'+str(args.projector_shape)+'_bs='+str(args.batch_size)+'_lr='+str(args.lr)+'_lambda='+str(args.lambda_)
     print(model_str)
-    model_path = Path(args.checkpoints_path)/('model_'+model_str+'.pt')
+    model_path = Path(args.checkpoints_path)/('model_'+model_str+'.pt_masked')
     optimizer_path =  Path(args.checkpoints_path)/('optimizer_'+model_str+'.pt')
-    writer = SummaryWriter('tensorboard/'+model_str)
+    writer = SummaryWriter('tensorboard/'+model_str+'_masked')
 
     seed_everything(args.seed)
 

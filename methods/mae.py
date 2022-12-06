@@ -17,10 +17,12 @@ class MaskedAutoencoderProcessor:
         patches = imgs_to_patches(imgs, patch_size=self.patch_size)
         tokens = model.backbone.patches_to_tokens(patches)
 
-        tokens, kept_idxs = drop_tokens(tokens, self.masking_proportion)
+        tokens, kept_idxs, not_kept_idxs = drop_tokens(tokens, self.masking_proportion)
         predictions = model.backbone.reconstruct(tokens)
+        mask = get_masked_img_in_patch_form(torch.ones_like(patches), not_kept_idxs)
 
-        loss = ((predictions-patches)**2).mean()
+        # mean loss on masked patches
+        loss = ((predictions-patches)**2 * mask).mean() / self.masking_proportion
 
         debug_dict = {name:value for name, value in zip(vars().keys(), vars().values())}
 
@@ -32,7 +34,7 @@ class MaskedAutoencoderProcessor:
             T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ])
 
-    def tensorboard_plot(self, writer, step, debug_dic, n_rows=10, n_columns=5):
+    def tensorboard_plot(self, writer, step, debug_dic, n_rows=10, n_columns=10):
         imgs = []
         for i in range(n_columns):
             pred_patches = debug_dic['predictions'][n_rows*i:n_rows*(i+1)]
@@ -64,7 +66,7 @@ def drop_tokens(patches, ratio):
     idxs2d = torch.cat([torch.randperm(seq)[None] for _ in range(b)]).to(patches.device)
     idxs = idxs2d[:, :, None].expand(-1, -1, c)
     shuffled_patches = torch.gather(patches, dim=1, index=idxs) 
-    return shuffled_patches[:, :n_keep], idxs2d[:, :n_keep]
+    return shuffled_patches[:, :n_keep], idxs2d[:, :n_keep], idxs2d[:, n_keep:]
 
 def get_masked_img_in_patch_form(patches, kept_idxs):
     b, n, c = patches.shape

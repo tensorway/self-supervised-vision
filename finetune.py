@@ -1,4 +1,5 @@
 #%%
+import os
 import time
 import torch
 import torchvision
@@ -7,6 +8,7 @@ import torch.nn as nn
 from pathlib import Path
 import torch.nn.functional as F
 from clearml import Task, Logger
+from misc.schedulers import CosineSchedulerWithWarmupStart
 from models.models import BenchmarkModel
 from data.transforms import val_transform
 from data.transforms import easy_transform as train_transform
@@ -23,6 +25,7 @@ def add_standard_arguments(parser):
     parser.add_argument("-s", "--seed", type=int, default=42, help="RNG seed. Default: 42.")
     parser.add_argument("-b", "--batch_size", type=int, default=512, help="train and valid batch size")
     parser.add_argument("-e", "--n_total_epochs", type=int, default=150, help="total number of epochs")
+    parser.add_argument("-w", "--n_warmup_epochs", type=int, default=10, help="number of warmup epochs")
     parser.add_argument("-lr", "--lr", type=float, default=3e-4, help="learning rate")
     parser.add_argument("-sda", "--save_delta_all", type=int, default=1500, help="in seconds, the model that is stored and overwritten to save space")
     parser.add_argument("-sdr", "--save_delta_revert", type=int, default=3000, help="in seconds, checkpoint models saved rarely to save storage")
@@ -32,7 +35,7 @@ def add_standard_arguments(parser):
     parser.add_argument("-ps", "--patch_size", type=int, default=4, help="pixel width and height of a patch, total number of pixels in a patch is patch_size**2")
     parser.add_argument("-tt", "--training_type", type=str, help="to linear probe or finetune", default='linear_probe', choices=['linear_probe', 'finetune'])
     parser.add_argument("-wd", "--weight_decay", type=float, default=1e-6, help="weight decay parameter")
-
+    parser.add_argument('-us', '--use_scheduler', type=bool, default=False)
 
 
 
@@ -55,6 +58,9 @@ def finetune(
     numepochs=150, 
     seed=42, 
     training_type = 'linear_probe',
+    n_warmup_epochs=0,
+    use_scheduler=False,
+    checkpoints_path = 'model_checkpoints'
     ):
 
     seed_everything(seed)
@@ -74,7 +80,11 @@ def finetune(
 
     
     criterion = nn.CrossEntropyLoss()
-    writer = SummaryWriter('tensorboard/finetune_'+model_str.split('/')[-1])
+    writer = SummaryWriter('tensorboard/finetune_'+model_str.split('/')[-1]+'_masked_lr='+str(lr)+'_nepochs='+str(numepochs))
+    if use_scheduler:
+        scheduler = CosineSchedulerWithWarmupStart(opt, n_warmup_epochs=n_warmup_epochs, n_total_epochs=numepochs)
+    else:
+        scheduler = torch.optim.lr_scheduler.ConstantLR(opt, factor=1, total_iters=1)
 
 
     step = 0
@@ -82,7 +92,7 @@ def finetune(
     t_last_save_all = time.time()
     scaler = torch.cuda.amp.GradScaler()
 
-    def whole_dataset_eval():
+    def whole_dataset_eval(ep):
         model.eval()
         cumacc = 0
         cumloss = 0
@@ -95,8 +105,8 @@ def finetune(
                     cumacc += (outputs.argmax(dim=-1) == labels).float().mean().item()
         acc, loss = cumacc/(ibatch+1), cumloss/(ibatch+1)
         print('valid', loss.item(), acc, ibatch)
-        writer.add_scalar("Loss_finetune/valid", loss, step)
-        writer.add_scalar("acc/valid", acc, step)
+        writer.add_scalar("Loss_finetune/valid", loss, ep)
+        writer.add_scalar("acc/valid", acc, ep)
         model.train()
         model.backbone.eval()
         return acc
@@ -120,22 +130,25 @@ def finetune(
             if ibatch%30 == 0:
                 writer.add_scalar("Loss_finetune/train", loss, step)
                 writer.add_scalar("acc/train", acc, step)
+                # writer.add_scalar('lr/finetune', scheduler.get_last_lr(), step)
                 print(ep, step, loss.item(), acc)
             if ibatch % 300 == 0:
-                whole_dataset_eval()
+                whole_dataset_eval(ep)
 
             if time.time() - t_last_save_all > save_delta_all:
-                save_model(model, str(model_path))
-                save_model(opt, str(optimizer_path))
+                save_model(model, os.path.join(checkpoints_path, 'finetune_model.pt'))
+                save_model(opt, os.path.join(checkpoints_path,'finetune_opt.pt'))
                 t_last_save_all = time.time()
 
             if time.time() - t_last_save_revert > save_delta_revert:
-                save_model(model, str(model_path).split('.pt')[0] + str(step) + '.pt')
-                save_model(opt, str(optimizer_path).split('.pt')[0] + str(step) + '.pt')
+                save_model(model, os.path.join(checkpoints_path, 'finetune_model' + str(step) + '.pt'))
+                save_model(opt, os.path.join(checkpoints_path,'finetune_opt' + str(step) + '.pt'))
                 t_last_save_revert = time.time()
             
 
             step += 1
+        scheduler.step()
+
 
     return whole_dataset_eval()
 
@@ -180,7 +193,10 @@ if __name__ == '__main__':
         seed=args.seed, 
         model_str=args.pretrained_model_path,
         device=device,
-        training_type=args.training_type
+        training_type=args.training_type,
+        n_warmup_epochs=args.n_warmup_epochs,
+        use_scheduler=args.use_scheduler,
+        checkpoints_path=args.checkpoints_path
         )
 
     # Write results #################################################################################
